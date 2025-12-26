@@ -25,6 +25,12 @@ const CONTRACT_ABI = [
   'function listings(uint256) external view returns (uint256 id, address owner, uint8 ipType, string memory title, bytes32 encryptedDescription, bytes32 encryptedDetails, uint256 price, uint8 status, uint256 createdAt)',
   'function buyerInterests(uint256) external view returns (uint256 id, address buyer, string memory category, bytes32 encryptedInterests, bytes32 encryptedCriteria, uint256 maxPrice, uint256 createdAt, bool isActive)',
   'function deals(uint256) external view returns (uint256 id, uint256 listingId, uint256 interestId, address seller, address buyer, uint256 proposedPrice, bytes32 encryptedSellerData, bytes32 encryptedBuyerData, uint8 status, uint256 createdAt, uint256 completedAt)',
+  'function getListingEncryptedDescription(uint256 _listingId) external view returns (bytes32)',
+  'function getListingEncryptedDetails(uint256 _listingId) external view returns (bytes32)',
+  'function getInterestEncryptedInterests(uint256 _interestId) external view returns (bytes32)',
+  'function getInterestEncryptedCriteria(uint256 _interestId) external view returns (bytes32)',
+  'function getDealEncryptedSellerData(uint256 _dealId) external view returns (bytes32)',
+  'function getDealEncryptedBuyerData(uint256 _dealId) external view returns (bytes32)',
   'event IPListingCreated(uint256 indexed listingId, address indexed owner, uint8 ipType, string title, uint256 price)',
   'event BuyerInterestCreated(uint256 indexed interestId, address indexed buyer, string category, uint256 maxPrice)',
   'event DealProposed(uint256 indexed dealId, uint256 indexed listingId, uint256 indexed interestId, address seller, address buyer, uint256 proposedPrice)',
@@ -75,6 +81,8 @@ export default function IPMarketplace() {
 
   const [activeTab, setActiveTab] = useState<Tab>('HOME')
   const [isLoading, setIsLoading] = useState(false)
+  const [relayerInstance, setRelayerInstance] = useState<any>(null)
+  const [isRelayerLoading, setIsRelayerLoading] = useState(false)
   
   // Listings
   const [allListings, setAllListings] = useState<IPListing[]>([])
@@ -104,10 +112,76 @@ export default function IPMarketplace() {
   }, [isConnected, chainId, switchChain])
 
   useEffect(() => {
+    initRelayer()
+  }, [])
+
+  useEffect(() => {
     if (isConnected && address && CONTRACT_ADDRESS !== '0x0000000000000000000000000000000000000000') {
       loadData()
     }
   }, [isConnected, address])
+
+  // Initialize FHE relayer
+  const initRelayer = async () => {
+    setIsRelayerLoading(true)
+    try {
+      const relayerModule: any = await Promise.race([
+        import('@zama-fhe/relayer-sdk/web'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Relayer timeout')), 10000))
+      ])
+
+      const sdkInitialized = await Promise.race([
+        relayerModule.initSDK(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SDK init timeout')), 10000))
+      ])
+      if (!sdkInitialized) {
+        throw new Error('SDK init failed')
+      }
+
+      const instance = await Promise.race([
+        relayerModule.createInstance(relayerModule.SepoliaConfig),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Instance creation timeout')), 10000))
+      ])
+      setRelayerInstance(instance)
+    } catch (error) {
+      console.error('Failed to initialize relayer:', error)
+    } finally {
+      setIsRelayerLoading(false)
+    }
+  }
+
+  // Encrypt string data using FHE
+  const encryptString = async (data: string): Promise<{ encrypted: string; attestation: string }> => {
+    if (!relayerInstance || !address) {
+      throw new Error('Relayer not initialized or wallet not connected')
+    }
+
+    // Convert string to hash and then to number for FHE encryption
+    const dataHash = ethers.keccak256(ethers.toUtf8Bytes(data))
+    const hashNumber = BigInt(dataHash) % BigInt(2**31 - 1)
+
+    const inputBuilder = relayerInstance.createEncryptedInput(
+      CONTRACT_ADDRESS,
+      address
+    )
+    inputBuilder.add32(Number(hashNumber))
+
+    const encryptedInput = await Promise.race([
+      inputBuilder.encrypt(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Encryption timeout')), 30000)
+      )
+    ]) as any
+
+    if (!encryptedInput?.handles || encryptedInput.handles.length === 0) {
+      throw new Error('Encryption failed')
+    }
+
+    return {
+      encrypted: encryptedInput.handles[0],
+      attestation: encryptedInput.inputProof || '0x'
+    }
+  }
 
   const getEthersSigner = async () => {
     if (walletClient) {
@@ -249,6 +323,11 @@ export default function IPMarketplace() {
       return
     }
 
+    if (!relayerInstance) {
+      alert('FHE relayer is not ready. Please wait...')
+      return
+    }
+
     if (!newListingTitle.trim() || !newListingPrice || parseFloat(newListingPrice) <= 0) {
       alert('Please fill in all required fields')
       return
@@ -256,12 +335,17 @@ export default function IPMarketplace() {
 
     setIsLoading(true)
     try {
+      const descriptionText = newListingDescription || newListingTitle
+      const detailsText = `Details: ${newListingDescription}`
+
+      // Encrypt using FHE
+      const { encrypted: encryptedDescription } = await encryptString(descriptionText)
+      const { encrypted: encryptedDetails } = await encryptString(detailsText)
+      
+      const price = parseEther(newListingPrice)
+      
       const signer = await getEthersSigner()
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      
-      const encryptedDescription = ethers.keccak256(ethers.toUtf8Bytes(newListingDescription || newListingTitle))
-      const encryptedDetails = ethers.keccak256(ethers.toUtf8Bytes(`Details: ${newListingDescription}`))
-      const price = parseEther(newListingPrice)
       
       const tx = await contract.createListing(
         newListingType,
@@ -271,7 +355,27 @@ export default function IPMarketplace() {
         price
       )
       
-      await tx.wait()
+      const receipt = await tx.wait()
+      
+      // Get listing ID from event
+      const listingId = receipt.logs?.[0]?.topics?.[1] 
+        ? Number(receipt.logs[0].topics[1])
+        : null
+
+      // Store original data for decryption (owner can decrypt their own listings)
+      if (listingId !== null && typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(`listing_${listingId}`, JSON.stringify({
+            description: descriptionText,
+            details: detailsText,
+            encryptedDescription,
+            encryptedDetails
+          }))
+        } catch (e) {
+          console.error('Failed to store listing data:', e)
+        }
+      }
+
       alert('Listing created successfully!')
       
       setNewListingTitle('')
@@ -292,6 +396,11 @@ export default function IPMarketplace() {
       return
     }
 
+    if (!relayerInstance) {
+      alert('FHE relayer is not ready. Please wait...')
+      return
+    }
+
     if (!newInterestCategory.trim() || !newInterestMaxPrice || parseFloat(newInterestMaxPrice) <= 0) {
       alert('Please fill in all required fields')
       return
@@ -299,12 +408,17 @@ export default function IPMarketplace() {
 
     setIsLoading(true)
     try {
+      const interestsText = newInterestDetails || newInterestCategory
+      const criteriaText = `Criteria: ${newInterestDetails}`
+
+      // Encrypt using FHE
+      const { encrypted: encryptedInterests } = await encryptString(interestsText)
+      const { encrypted: encryptedCriteria } = await encryptString(criteriaText)
+      
+      const maxPrice = parseEther(newInterestMaxPrice)
+      
       const signer = await getEthersSigner()
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      
-      const encryptedInterests = ethers.keccak256(ethers.toUtf8Bytes(newInterestDetails || newInterestCategory))
-      const encryptedCriteria = ethers.keccak256(ethers.toUtf8Bytes(`Criteria: ${newInterestDetails}`))
-      const maxPrice = parseEther(newInterestMaxPrice)
       
       const tx = await contract.createBuyerInterest(
         newInterestCategory,
@@ -313,7 +427,27 @@ export default function IPMarketplace() {
         maxPrice
       )
       
-      await tx.wait()
+      const receipt = await tx.wait()
+      
+      // Get interest ID from event
+      const interestId = receipt.logs?.[0]?.topics?.[1] 
+        ? Number(receipt.logs[0].topics[1])
+        : null
+
+      // Store original data for decryption
+      if (interestId !== null && typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(`interest_${interestId}`, JSON.stringify({
+            interests: interestsText,
+            criteria: criteriaText,
+            encryptedInterests,
+            encryptedCriteria
+          }))
+        } catch (e) {
+          console.error('Failed to store interest data:', e)
+        }
+      }
+
       alert('Buyer interest created successfully!')
       
       setNewInterestCategory('')
@@ -331,6 +465,11 @@ export default function IPMarketplace() {
   const proposeDeal = async (listingId: number, interestId: number, priceEth?: string) => {
     if (!isConnected || !address) {
       alert('Please connect your wallet')
+      return
+    }
+
+    if (!relayerInstance) {
+      alert('FHE relayer is not ready. Please wait...')
       return
     }
 
@@ -352,11 +491,15 @@ export default function IPMarketplace() {
 
     setIsLoading(true)
     try {
+      // Encrypt deal data using FHE
+      const sellerDataText = `Deal data for listing ${listingId}`
+      const buyerDataText = `Deal data for interest ${interestId}`
+      
+      const { encrypted: encryptedSellerData } = await encryptString(sellerDataText)
+      const { encrypted: encryptedBuyerData } = await encryptString(buyerDataText)
+      
       const signer = await getEthersSigner()
       const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer)
-      
-      const encryptedSellerData = ethers.keccak256(ethers.toUtf8Bytes('seller_data'))
-      const encryptedBuyerData = ethers.keccak256(ethers.toUtf8Bytes('buyer_data'))
       
       const tx = await contract.proposeDeal(
         listingId,
@@ -366,7 +509,27 @@ export default function IPMarketplace() {
         encryptedBuyerData
       )
       
-      await tx.wait()
+      const receipt = await tx.wait()
+      
+      // Get deal ID from event
+      const dealId = receipt.logs?.[0]?.topics?.[1] 
+        ? Number(receipt.logs[0].topics[1])
+        : null
+
+      // Store original data for decryption
+      if (dealId !== null && typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(`deal_${dealId}`, JSON.stringify({
+            sellerData: sellerDataText,
+            buyerData: buyerDataText,
+            encryptedSellerData,
+            encryptedBuyerData
+          }))
+        } catch (e) {
+          console.error('Failed to store deal data:', e)
+        }
+      }
+
       alert('Deal proposed successfully!')
       setProposedPrice('')
       await loadData()
@@ -484,6 +647,17 @@ export default function IPMarketplace() {
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
+        {/* FHE Relayer Loading Indicator */}
+        {isRelayerLoading && (
+          <div className="mb-6 bg-yellow-900/50 border border-yellow-500/50 rounded-xl p-4 text-center">
+            <p className="text-yellow-200">Initializing FHE encryption system...</p>
+          </div>
+        )}
+        {!isRelayerLoading && !relayerInstance && (
+          <div className="mb-6 bg-red-900/50 border border-red-500/50 rounded-xl p-4 text-center">
+            <p className="text-red-200">FHE encryption system failed to initialize. Please refresh the page.</p>
+          </div>
+        )}
         {/* Home Tab */}
         {activeTab === 'HOME' && (
           <div className="space-y-8">
