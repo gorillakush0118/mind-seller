@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.24;
+
+import {FHE, euint32, externalEuint32} from "@fhevm/solidity/lib/FHE.sol";
+import {ZamaEthereumConfig} from "@fhevm/solidity/config/ZamaConfig.sol";
 
 /**
  * Encrypted Intellectual Property Marketplace
  * 
  * Uses Fully Homomorphic Encryption (FHE) via Zama FHEVM to store and process
- * encrypted IP data. Encrypted data is stored as FHE handles (bytes32) which
- * represent encrypted values that can be used in computations without decryption.
+ * encrypted IP data. Encrypted data is stored as euint32 values with ACL support
+ * for user decryption.
  */
-contract IPMarketplace {
+contract IPMarketplace is ZamaEthereumConfig {
     
     enum IPType {
         Patent,
@@ -36,8 +39,8 @@ contract IPMarketplace {
         address owner;
         IPType ipType;
         string title;
-        bytes32 encryptedDescription; // FHE handle for encrypted description (euint32)
-        bytes32 encryptedDetails; // FHE handle for additional encrypted details (euint32)
+        euint32 encryptedDescription; // Encrypted description with ACL support
+        euint32 encryptedDetails; // Encrypted details with ACL support
         uint256 price; // Price in wei
         ListingStatus status;
         uint256 createdAt;
@@ -47,8 +50,8 @@ contract IPMarketplace {
         uint256 id;
         address buyer;
         string category; // What type of IP they're looking for
-        bytes32 encryptedInterests; // FHE handle for encrypted buyer interests (euint32)
-        bytes32 encryptedCriteria; // FHE handle for encrypted criteria (euint32)
+        euint32 encryptedInterests; // Encrypted buyer interests with ACL support
+        euint32 encryptedCriteria; // Encrypted criteria with ACL support
         uint256 maxPrice; // Maximum price willing to pay
         uint256 createdAt;
         bool isActive;
@@ -61,8 +64,8 @@ contract IPMarketplace {
         address seller;
         address buyer;
         uint256 proposedPrice;
-        bytes32 encryptedSellerData; // FHE handle for encrypted seller info (euint32)
-        bytes32 encryptedBuyerData; // FHE handle for encrypted buyer info (euint32)
+        euint32 encryptedSellerData; // Encrypted seller info with ACL support
+        euint32 encryptedBuyerData; // Encrypted buyer info with ACL support
         DealStatus status;
         uint256 createdAt;
         uint256 completedAt;
@@ -125,34 +128,40 @@ contract IPMarketplace {
      * Create a new IP listing with FHE encrypted data
      * @param _ipType Type of IP (Patent, Trademark, etc.)
      * @param _title Public title of the listing
-     * @param _encryptedDescription FHE handle (euint32) for encrypted description
-     * @param _encryptedDetails FHE handle (euint32) for encrypted details
+     * @param encryptedDescription External encrypted description (euint32)
+     * @param encryptedDetails External encrypted details (euint32)
+     * @param inputProof Attestation proof for the encrypted values
      * @param _price Price in wei
      * @return listingId The ID of the newly created listing
      */
     function createListing(
         IPType _ipType,
         string memory _title,
-        bytes32 _encryptedDescription, // FHE handle
-        bytes32 _encryptedDetails, // FHE handle
+        externalEuint32 encryptedDescription,
+        externalEuint32 encryptedDetails,
+        bytes calldata inputProof,
         uint256 _price
     ) external returns (uint256) {
         require(bytes(_title).length > 0, "Title cannot be empty");
-        require(_encryptedDescription != bytes32(0), "FHE encrypted description cannot be empty");
         require(_price > 0, "Price must be greater than 0");
         
         uint256 listingId = listingCounter;
         listingCounter++;
         
-        // Store FHE handles - these represent encrypted data that can be used
-        // in homomorphic operations without decryption
+        // Convert external encrypted values to euint32 and set ACL
+        euint32 description = FHE.fromExternal(encryptedDescription, inputProof);
+        FHE.allow(description, msg.sender); // Allow owner to decrypt description
+        
+        euint32 details = FHE.fromExternal(encryptedDetails, inputProof);
+        FHE.allow(details, msg.sender); // Allow owner to decrypt details
+        
         listings[listingId] = IPListing({
             id: listingId,
             owner: msg.sender,
             ipType: _ipType,
             title: _title,
-            encryptedDescription: _encryptedDescription, // FHE handle stored
-            encryptedDetails: _encryptedDetails, // FHE handle stored
+            encryptedDescription: description,
+            encryptedDetails: details,
             price: _price,
             status: ListingStatus.Active,
             createdAt: block.timestamp
@@ -167,31 +176,38 @@ contract IPMarketplace {
     /**
      * Create buyer interest profile with FHE encrypted data
      * @param _category Public category string
-     * @param _encryptedInterests FHE handle (euint32) for encrypted interests
-     * @param _encryptedCriteria FHE handle (euint32) for encrypted criteria
+     * @param encryptedInterests External encrypted interests (euint32)
+     * @param encryptedCriteria External encrypted criteria (euint32)
+     * @param inputProof Attestation proof for the encrypted values
      * @param _maxPrice Maximum price buyer is willing to pay
      * @return interestId The ID of the newly created interest
      */
     function createBuyerInterest(
         string memory _category,
-        bytes32 _encryptedInterests, // FHE handle
-        bytes32 _encryptedCriteria, // FHE handle
+        externalEuint32 encryptedInterests,
+        externalEuint32 encryptedCriteria,
+        bytes calldata inputProof,
         uint256 _maxPrice
     ) external returns (uint256) {
         require(bytes(_category).length > 0, "Category cannot be empty");
-        require(_encryptedInterests != bytes32(0), "FHE encrypted interests cannot be empty");
         require(_maxPrice > 0, "Max price must be greater than 0");
         
         uint256 interestId = interestCounter;
         interestCounter++;
         
-        // Store FHE handles for encrypted buyer interests
+        // Convert external encrypted values to euint32 and set ACL
+        euint32 interests = FHE.fromExternal(encryptedInterests, inputProof);
+        FHE.allow(interests, msg.sender); // Allow buyer to decrypt interests
+        
+        euint32 criteria = FHE.fromExternal(encryptedCriteria, inputProof);
+        FHE.allow(criteria, msg.sender); // Allow buyer to decrypt criteria
+        
         buyerInterests[interestId] = BuyerInterest({
             id: interestId,
             buyer: msg.sender,
             category: _category,
-            encryptedInterests: _encryptedInterests, // FHE handle stored
-            encryptedCriteria: _encryptedCriteria, // FHE handle stored
+            encryptedInterests: interests,
+            encryptedCriteria: criteria,
             maxPrice: _maxPrice,
             createdAt: block.timestamp,
             isActive: true
@@ -208,16 +224,18 @@ contract IPMarketplace {
      * @param _listingId ID of the listing
      * @param _interestId ID of the buyer interest
      * @param _proposedPrice Proposed price for the deal
-     * @param _encryptedSellerData FHE handle (euint32) for encrypted seller data
-     * @param _encryptedBuyerData FHE handle (euint32) for encrypted buyer data
+     * @param encryptedSellerData External encrypted seller data (euint32)
+     * @param encryptedBuyerData External encrypted buyer data (euint32)
+     * @param inputProof Attestation proof for the encrypted values
      * @return dealId The ID of the newly created deal
      */
     function proposeDeal(
         uint256 _listingId,
         uint256 _interestId,
         uint256 _proposedPrice,
-        bytes32 _encryptedSellerData, // FHE handle
-        bytes32 _encryptedBuyerData // FHE handle
+        externalEuint32 encryptedSellerData,
+        externalEuint32 encryptedBuyerData,
+        bytes calldata inputProof
     ) external returns (uint256) {
         IPListing storage listing = listings[_listingId];
         BuyerInterest storage interest = buyerInterests[_interestId];
@@ -233,8 +251,15 @@ contract IPMarketplace {
         uint256 dealId = dealCounter;
         dealCounter++;
         
-        // Store FHE handles for deal data - these encrypted values remain
-        // private and can be used in homomorphic computations
+        // Convert external encrypted values to euint32 and set ACL
+        euint32 sellerData = FHE.fromExternal(encryptedSellerData, inputProof);
+        FHE.allow(sellerData, listing.owner); // Allow seller to decrypt their data
+        FHE.allow(sellerData, interest.buyer); // Allow buyer to decrypt seller data
+        
+        euint32 buyerData = FHE.fromExternal(encryptedBuyerData, inputProof);
+        FHE.allow(buyerData, interest.buyer); // Allow buyer to decrypt their data
+        FHE.allow(buyerData, listing.owner); // Allow seller to decrypt buyer data
+        
         deals[dealId] = Deal({
             id: dealId,
             listingId: _listingId,
@@ -242,8 +267,8 @@ contract IPMarketplace {
             seller: listing.owner,
             buyer: interest.buyer,
             proposedPrice: _proposedPrice,
-            encryptedSellerData: _encryptedSellerData, // FHE handle stored
-            encryptedBuyerData: _encryptedBuyerData, // FHE handle stored
+            encryptedSellerData: sellerData,
+            encryptedBuyerData: buyerData,
             status: DealStatus.Pending,
             createdAt: block.timestamp,
             completedAt: 0
@@ -376,65 +401,64 @@ contract IPMarketplace {
     }
 
     /**
-     * Get FHE encrypted description handle for a listing
-     * Returns the FHE handle that represents the encrypted description
-     * This handle can be used in homomorphic operations via the FHE relayer
+     * Get FHE encrypted description for a listing
+     * Returns the encrypted description (euint32) that can be decrypted by authorized users
      * @param _listingId The listing ID
-     * @return The FHE handle (bytes32) for the encrypted description
+     * @return The encrypted description (euint32)
      */
-    function getListingEncryptedDescription(uint256 _listingId) external view returns (bytes32) {
+    function getListingEncryptedDescription(uint256 _listingId) external view returns (euint32) {
         require(listings[_listingId].owner != address(0), "Listing does not exist");
-        return listings[_listingId].encryptedDescription; // Returns FHE handle
+        return listings[_listingId].encryptedDescription;
     }
 
     /**
-     * Get FHE encrypted details handle for a listing
+     * Get FHE encrypted details for a listing
      * @param _listingId The listing ID
-     * @return The FHE handle (bytes32) for the encrypted details
+     * @return The encrypted details (euint32)
      */
-    function getListingEncryptedDetails(uint256 _listingId) external view returns (bytes32) {
+    function getListingEncryptedDetails(uint256 _listingId) external view returns (euint32) {
         require(listings[_listingId].owner != address(0), "Listing does not exist");
-        return listings[_listingId].encryptedDetails; // Returns FHE handle
+        return listings[_listingId].encryptedDetails;
     }
 
     /**
-     * Get FHE encrypted interests handle for a buyer interest
+     * Get FHE encrypted interests for a buyer interest
      * @param _interestId The interest ID
-     * @return The FHE handle (bytes32) for the encrypted interests
+     * @return The encrypted interests (euint32)
      */
-    function getInterestEncryptedInterests(uint256 _interestId) external view returns (bytes32) {
+    function getInterestEncryptedInterests(uint256 _interestId) external view returns (euint32) {
         require(buyerInterests[_interestId].buyer != address(0), "Interest does not exist");
-        return buyerInterests[_interestId].encryptedInterests; // Returns FHE handle
+        return buyerInterests[_interestId].encryptedInterests;
     }
 
     /**
-     * Get FHE encrypted criteria handle for a buyer interest
+     * Get FHE encrypted criteria for a buyer interest
      * @param _interestId The interest ID
-     * @return The FHE handle (bytes32) for the encrypted criteria
+     * @return The encrypted criteria (euint32)
      */
-    function getInterestEncryptedCriteria(uint256 _interestId) external view returns (bytes32) {
+    function getInterestEncryptedCriteria(uint256 _interestId) external view returns (euint32) {
         require(buyerInterests[_interestId].buyer != address(0), "Interest does not exist");
-        return buyerInterests[_interestId].encryptedCriteria; // Returns FHE handle
+        return buyerInterests[_interestId].encryptedCriteria;
     }
 
     /**
-     * Get FHE encrypted seller data handle for a deal
+     * Get FHE encrypted seller data for a deal
      * @param _dealId The deal ID
-     * @return The FHE handle (bytes32) for the encrypted seller data
+     * @return The encrypted seller data (euint32)
      */
-    function getDealEncryptedSellerData(uint256 _dealId) external view returns (bytes32) {
+    function getDealEncryptedSellerData(uint256 _dealId) external view returns (euint32) {
         require(deals[_dealId].seller != address(0), "Deal does not exist");
-        return deals[_dealId].encryptedSellerData; // Returns FHE handle
+        return deals[_dealId].encryptedSellerData;
     }
 
     /**
-     * Get FHE encrypted buyer data handle for a deal
+     * Get FHE encrypted buyer data for a deal
      * @param _dealId The deal ID
-     * @return The FHE handle (bytes32) for the encrypted buyer data
+     * @return The encrypted buyer data (euint32)
      */
-    function getDealEncryptedBuyerData(uint256 _dealId) external view returns (bytes32) {
+    function getDealEncryptedBuyerData(uint256 _dealId) external view returns (euint32) {
         require(deals[_dealId].buyer != address(0), "Deal does not exist");
-        return deals[_dealId].encryptedBuyerData; // Returns FHE handle
+        return deals[_dealId].encryptedBuyerData;
     }
 }
 
