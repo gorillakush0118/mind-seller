@@ -232,7 +232,7 @@ The contract includes functions to retrieve FHE handles:
 
 ## 📊 Contract information
 
-**Contract Address**: `0x3224D615960F3f3746a1Fd416fda41303e687bc1`  
+**Contract Address**: `0x3fD96016ADd432e44836BbA7f162056E19ae5e9e`  
 **Network**: Sepolia Testnet  
 **Deployer**: `0xDD645f1EAE2A4a554F86d296f6A392bE846fDB13`
 
