@@ -8,7 +8,7 @@
 ```
 
 Encrypted marketplace for trading ideas and intellectual property.  
-Private by design. On-chain by default.
+Private by design. On-chain by default
 
 ⸻
 
